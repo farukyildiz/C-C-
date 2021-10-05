@@ -57,7 +57,7 @@ char   connectErrorRedirect[1024] =
 
 char ldapGroups[99][99];
 int ldapCount = 0;
-char ad_enabled_x[99][5];
+int ad_enabled = 0;
 int adCount = 0;
 
 static pthread_t  worker[UFDB_MAX_SQUID_CONCURRENCY];
@@ -597,31 +597,28 @@ static char* split_string(char* line, char* delim, int index)
 	return result;
 }
 
-static void replaceWord(char* line, char* oldWord, char* newWord)
+static char* replaceWord(char* line, char* oldWord, char* newWord)
 {
-    ufdbLogMessage("line: %s\n", line);
-    ufdbLogMessage("newWord: %s\n", newWord);
-	char* result;
-	int i, count = 0;
 	int newWordlen = strlen(newWord);
 	int oldWordlen = strlen(oldWord);
-    char *line_tmp[UFDB_HTTP_1_1_MAX_URI_LENGTH+512];
+	int i, j, k;
 
-    int s, e:
 	for (i = 0; line[i] != '\0'; i++) {
 		if (strstr(&line[i], oldWord) == &line[i]) {
-		    s = i;
-			e += oldWordlen - 1;
+			for (j = strlen(line); j >= i + oldWordlen ; --j) {
+				line[j + newWordlen - oldWordlen] = line[j];
+			}
+
+			for (k = 0; k < newWordlen ; ++k) {
+				line[i + k] = newWord[k];
+			}
 			break;
 		}
 	}
-
-    strcpy(line_tmp, line[e])
-    strcpy(line[s], newWord)
-    strcpy(line[s+newWordlen], line_tmp)
+    return line;
 }
 
-static char* set_user(char* line, char* user)
+static void set_user(char* line, char* user)
 {
     char newWord[256] = " ";
     strcat(newWord, user);
@@ -629,11 +626,9 @@ static char* set_user(char* line, char* user)
     replaceWord(line, " - ", newWord);
 }
 
-static char* check_set_ip(char* line)
+static void check_set_ip(char* line)
 {
     int in_group = 0;
-    char * result = line;
-    char * line_tmp = line;
     char line_tmp[UFDB_HTTP_1_1_MAX_URI_LENGTH+512];
     char ldap_user_prefix[] = "ldap_user_";
     char ldap_group_prefix[] = "ldap_group_";
@@ -641,16 +636,15 @@ static char* check_set_ip(char* line)
     char ip2user_path[50] = "/var/cache/dc/ip2user/";
     char group2user_path[50] = "/var/cache/dc/groups/";
 
+    strcpy(line_tmp, line);
+
     FILE *fp;
     char* user;
     char* ip_str = split_string(line_tmp, " ", 2);
     char* ip = split_string(ip_str, "/", 1);
-    ufdbLogMessage("ip: %s \n", ip);
 
-    if (strcmp(ad_enabled, "true") == 0) {
-
+    if (ad_enabled == 1) {
     	strcat(ip2user_path, ip);
-    	ufdbLogMessage("%s \n", ip2user_path);
 
         fp = fopen(ip2user_path, "r");
         char buf1[50];
@@ -658,65 +652,45 @@ static char* check_set_ip(char* line)
         	user = buf1;
        	}
         fclose(fp);
-        printf("user: %s \n", user);
 
        	for(int i = 0; i < ldapCount ; ++i)
         {
             strcat(group2user_path, ldapGroups[i]);
             strcat(group2user_path, "/users_file/");
             strcat(group2user_path, user);
-            ufdbLogMessage("group to user: %s \n", group2user_path);
             if (access(group2user_path, F_OK) == 0) {
-            	ufdbLogMessage("%s in %s group \n", user, ldapGroups[i]);
             	in_group = 1;
             }
-            printf("=%s=\n", ldapGroups[i]);
         }
 
        	if (in_group == 0 && strcmp(user, "") != 0 && user != NULL) {
-       		ufdbLogMessage("set ldap group [ %s ] user text \n", user);
-       		ufdbLogMessage("");
+            user[strcspn(user, "\n")] = 0;
+            strcat(ldap_user_prefix, user);
+       		set_user(line, ldap_user_prefix);
     	} else if (in_group == 1) {
-    		ufdbLogMessage("");
+    		user[strcspn(user, "\n")] = 0;
+            strcat(ldap_group_prefix, user);
+            set_user(line, ldap_group_prefix);
     	}
     }
 
     char hotspot_path[99] = "/var/cache/hotspot/";
     strcat(hotspot_path, ip);
-    ufdbLogMessage("hotspot_path: %s\n", hotspot_path);
     if (access(hotspot_path, F_OK) == 0) {
         fp = fopen(hotspot_path, "r");
         char buf3[99];
         while( (fgets(buf3, 99, fp) != NULL) ) {
-            ufdbLogMessage("read buf3: %s\n", buf3);
             user = buf3;
         }
-        ufdbLogMessage("1.user: %s\n", user);
         if (strcmp(user, "") != 0 && user != NULL) {
             user[strcspn(user, "\n")] = 0;
-            ufdbLogMessage("hotspot_prefix: %s\n", hotspot_prefix);
             strcat(hotspot_prefix, user);
-            ufdbLogMessage("hotspot_prefix_user: %s\n", hotspot_prefix);
-            ufdbLogMessage("line after hotspot_prefix: %s\n", line);
-            result = set_user(line, hotspot_prefix);
-            ufdbLogMessage("user: %s\n", user);
-            ufdbLogMessage("line: %s\n", line);
-            ufdbLogMessage("result: %s\n", result);
+            set_user(line, hotspot_prefix);
             ufdbLogMessage("");
         }
     }
 
-    ufdbLogMessage("line: %s \n", line);
-    ufdbLogMessage("");
-
     fclose(fp);
-
-    if (result != line) {
-        strcpy(line, result);
-        free(result);
-    }
-
-    return line;
 }
 
 
@@ -1136,28 +1110,17 @@ int main(
     pthread_attr_t      attr;
 
     FILE *fp;
-    fp = fopen("/usr/local/etc/ufdbGuard/ufdbGuard.conf", "r");
+    fp = fopen("/usr/local/etc/squid/lists/ad_groups", "r");
     char buf2[999];
-    printf(" === new commit ===");
     while( (fgets(buf2, 999, fp) != NULL) ) {
-    	char *ptr = strstr(buf2, "ldap_group");
-    	if (ptr != NULL)
-    	{
-    		char * split_line = strtok(ptr, " ");
-    		while (split_line != NULL) {
-    			char *ptr2 = strstr(split_line, "ldap_group");
-    			if (ptr2 != NULL && strcmp(ptr2, "") != 0)
-    			{
-    				ptr2[strcspn(ptr2, "\n")] = 0;
-    				strcpy(ldapGroups[ldapCount], replaceWord(ptr2, "\"", ""));
-    				++ldapCount;
-    			}
-    			split_line = strtok(NULL, " ");
-    		}
-    	}
+        buf2[strcspn(buf2, "\n")] = 0;
+        strcpy(ldapGroups[ldapCount], buf2);
+        ++ldapCount;
     }
 
-    // TODO: ad enabled file
+    if (access("/usr/local/etc/squid/lists/ad", F_OK) == 0) {
+        ad_enabled = 1;
+    }
 
     globalPid = getpid();
     strcpy( UFDBprogname, "ufdbgclient" );
